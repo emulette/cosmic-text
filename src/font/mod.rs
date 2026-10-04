@@ -55,6 +55,7 @@ pub struct Font {
     id: fontdb::ID,
     monospace_fallback: Option<FontMonospaceFallback>,
     pub(crate) italic_or_oblique: bool,
+    synthetic_bold: bool,
 }
 
 impl fmt::Debug for Font {
@@ -102,6 +103,27 @@ impl Font {
         &self.harfrust.borrow_owner().metrics
     }
 
+    /// Stroke width for Blink-style default weight synthesis, or zero for a real face.
+    ///
+    /// A request >= 600 synthesizes a resolved static face below 600 only when its family has
+    /// no face >= 600 in this database; variable `wght` axes retain their clamped real instance.
+    /// This follows Blink's `CSSSegmentedFontFace::GetFontData` and `kBoldThreshold`:
+    /// <https://github.com/chromium/chromium/blob/140.0.7339.0/third_party/blink/renderer/core/css/css_segmented_font_face.cc>.
+    /// The outline is stroked and filled: width is size times a ratio linearly interpolated
+    /// from 1/24 at 9px to 1/32 at 36px, clamped outside that interval (half on each side), per
+    /// Skia's `SkScalerContextRec::useStrokeForFakeBold` and `SkTextFormatParams.h`:
+    /// <https://github.com/google/skia/blob/chrome/m140/src/core/SkScalerContext.cpp>.
+    /// Advances stay unchanged: DirectWrite's `setAdvance` uses the face metrics, and Skia
+    /// copies those advances before computing stroked bounds, so layout and paint share them:
+    /// <https://github.com/google/skia/blob/chrome/m140/src/ports/SkScalerContext_win_dw.cpp>.
+    pub fn synthetic_bold_stroke_width(&self, size: f32) -> f32 {
+        if !self.synthetic_bold {
+            return 0.0;
+        }
+        let t = ((size - 9.0) / (36.0 - 9.0)).clamp(0.0, 1.0);
+        size * (1.0 / 24.0 + (1.0 / 32.0 - 1.0 / 24.0) * t)
+    }
+
     #[cfg(feature = "peniko")]
     pub fn as_peniko(&self) -> PenikoFont {
         self.data.clone()
@@ -138,6 +160,16 @@ impl Font {
         // `ShaperData`, and once to create the persistent `FontRef` tied to the
         // lifetime of the face data.
         let font_ref = FontRef::from_index((*data).as_ref(), info.index).ok()?;
+        let synthetic_bold = weight.0 >= 600
+            && info.weight.0 < 600
+            && font_ref.axes().get_by_tag(Tag::new(b"wght")).is_none()
+            && !db.faces().any(|face| {
+                face.weight.0 >= 600
+                    && face
+                        .families
+                        .iter()
+                        .any(|(family, _)| info.families.iter().any(|(name, _)| name == family))
+            });
         let location = font_ref
             .axes()
             .location([(Tag::new(b"wght"), weight.0 as f32)]);
@@ -206,6 +238,7 @@ impl Font {
 
         Some(Self {
             id: info.id,
+            synthetic_bold,
             monospace_fallback,
             #[cfg(feature = "swash")]
             swash: {

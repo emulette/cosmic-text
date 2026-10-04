@@ -27,7 +27,7 @@ pub struct CacheKey {
     pub x_bin: SubpixelBin,
     /// Binning of fractional Y offset
     pub y_bin: SubpixelBin,
-    /// Font weight
+    /// Requested font weight, separating real instances and synthesized static variants.
     pub font_weight: fontdb::Weight,
     /// [`CacheKeyFlags`]
     pub flags: CacheKeyFlags,

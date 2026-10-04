@@ -4,9 +4,9 @@
 
 use crate::fallback::FontFallbackIter;
 use crate::{
-    math, Align, Attrs, AttrsList, CacheKeyFlags, Color, DecorationMetrics, DecorationSpan,
-    Ellipsize, EllipsizeHeightLimit, Family, Font, FontSystem, GlyphDecorationData, Hinting,
-    LayoutGlyph, LayoutLine, Metrics, Wrap,
+    Align, Attrs, AttrsList, CacheKeyFlags, Color, DecorationMetrics, DecorationSpan, Ellipsize,
+    EllipsizeHeightLimit, Family, Font, FontSystem, GlyphDecorationData, Hinting, LayoutGlyph,
+    LayoutLine, Metrics, Wrap, math,
 };
 #[cfg(not(feature = "std"))]
 use alloc::{format, vec, vec::Vec};
@@ -125,6 +125,7 @@ fn shape_fallback(
     start_run: usize,
     end_run: usize,
     span_rtl: bool,
+    shaping_language: &str,
 ) -> Vec<usize> {
     let run = &line[start_run..end_run];
 
@@ -148,6 +149,9 @@ fn shape_fallback(
         buffer.push_str(run);
     }
     buffer.guess_segment_properties();
+    if let Ok(language) = shaping_language.parse::<harfrust::Language>() {
+        buffer.set_language(language);
+    }
 
     let rtl = matches!(buffer.direction(), harfrust::Direction::RightToLeft);
     assert_eq!(rtl, span_rtl);
@@ -213,8 +217,7 @@ fn shape_fallback(
         }
 
         let attrs = attrs_list.get_span(start_glyph);
-        let x_advance = pos.x_advance as f32 / font_scale
-            + attrs.letter_spacing_opt.map_or(0.0, |spacing| spacing.0);
+        let x_advance = pos.x_advance as f32 / font_scale;
         let y_advance = pos.y_advance as f32 / font_scale;
         let x_offset = pos.x_offset as f32 / font_scale;
         let y_offset = pos.y_offset as f32 / font_scale;
@@ -238,6 +241,31 @@ fn shape_fallback(
             cache_key_flags: override_fake_italic(attrs.cache_key_flags, font, &attrs),
             metrics_opt: attrs.metrics_opt.map(Into::into),
         });
+    }
+
+    // HarfRust glyphs of one cluster are contiguous. Attach tracking to a real advance,
+    // then compensate later offsets so marks do not move relative to their base. This
+    // remains correct when paragraph layout reverses the glyph sequence for RTL.
+    let mut cluster_start = glyph_start;
+    while cluster_start < glyphs.len() {
+        let source_start = glyphs[cluster_start].start;
+        let cluster_end = (cluster_start + 1..glyphs.len())
+            .find(|&index| glyphs[index].start != source_start)
+            .unwrap_or(glyphs.len());
+        if !is_tracking_control(line[source_start..].chars().next()) {
+            let spacing = attrs_list
+                .get_span(source_start)
+                .letter_spacing_opt
+                .map_or(0.0, |spacing| spacing.0);
+            let owner = (cluster_start..cluster_end)
+                .find(|&index| glyphs[index].x_advance != 0.0)
+                .unwrap_or(cluster_start);
+            glyphs[owner].x_advance += spacing;
+            for glyph in &mut glyphs[owner + 1..cluster_end] {
+                glyph.x_offset -= spacing;
+            }
+        }
+        cluster_start = cluster_end;
     }
 
     // Adjust end of glyphs
@@ -269,6 +297,10 @@ fn shape_fallback(
     scratch.harfrust_buffer = Some(glyph_buffer.clear());
 
     missing
+}
+
+fn is_tracking_control(character: Option<char>) -> bool {
+    matches!(character, Some('\u{2060}' | '\u{2068}' | '\u{2069}'))
 }
 
 fn shape_run(
@@ -314,12 +346,24 @@ fn shape_run(
     );
 
     let font = font_iter.next().expect("no default font found");
+    let lead_scale = font.metrics().units_per_em as f32;
+    let lead_ascent = font.metrics().ascent / lead_scale;
+    let lead_descent = -font.metrics().descent / lead_scale;
 
     let glyph_start = glyphs.len();
     let mut missing = {
+        let shaping_language = font_iter.locale().to_owned();
         let scratch = font_iter.shape_caches();
         shape_fallback(
-            scratch, glyphs, &font, line, attrs_list, start_run, end_run, span_rtl,
+            scratch,
+            glyphs,
+            &font,
+            line,
+            attrs_list,
+            start_run,
+            end_run,
+            span_rtl,
+            &shaping_language,
         )
     };
 
@@ -334,6 +378,7 @@ fn shape_run(
             font_iter.face_name(font.id())
         );
         let mut fb_glyphs = Vec::new();
+        let shaping_language = font_iter.locale().to_owned();
         let scratch = font_iter.shape_caches();
         let fb_missing = shape_fallback(
             scratch,
@@ -344,6 +389,7 @@ fn shape_run(
             start_run,
             end_run,
             span_rtl,
+            &shaping_language,
         );
 
         // Insert all matching glyphs
@@ -398,6 +444,13 @@ fn shape_run(
                 }
             }
         }
+    }
+
+    // A web inline box keeps its first available font's ascent and descent, so fallback glyphs sit
+    // on the lead font's baseline (Prika patch).
+    for glyph in &mut glyphs[glyph_start..] {
+        glyph.ascent = lead_ascent;
+        glyph.descent = lead_descent;
     }
 
     // Debug missing font fallbacks
@@ -993,6 +1046,7 @@ impl ShapeSpan {
 
                         if let Some(font) = font_iter.next() {
                             let mut glyphs = Vec::new();
+                            let shaping_language = font_iter.locale().to_owned();
                             let scratch = font_iter.shape_caches();
                             shape_fallback(
                                 scratch,
@@ -1003,6 +1057,7 @@ impl ShapeSpan {
                                 0,
                                 probe_text.len(),
                                 false,
+                                &shaping_language,
                             );
 
                             // 1. If we have fewer glyphs than chars, it's definitely a ligature (e.g. -> becoming 1 arrow).
@@ -1428,8 +1483,8 @@ impl ShapeLine {
                 attrs_list.defaults()
             } else {
                 attrs_list.get_span(0) // TODO: using the attrs from the first span for
-                                       // ellipsis even if it's at the end. Which for rich text may look weird if the first
-                                       // span has a different color or size than where ellipsizing is happening
+                // ellipsis even if it's at the end. Which for rich text may look weird if the first
+                // span has a different color or size than where ellipsizing is happening
             };
             let mut glyphs = shape_ellipsis(font_system, &attrs, shaping, rtl);
             if rtl {

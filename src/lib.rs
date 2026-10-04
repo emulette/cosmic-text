@@ -118,6 +118,8 @@ mod edit;
 pub use self::font::*;
 mod font;
 
+pub use unicode_script::Script;
+
 pub use self::layout::*;
 mod layout;
 

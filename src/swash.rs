@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 #[cfg(not(feature = "std"))]
-use alloc::boxed::Box;
+use alloc::{boxed::Box, vec};
 #[cfg(feature = "no_std")]
 use core_maths::CoreFloat;
 
 use core::fmt;
 use swash::scale::{image::Content, ScaleContext};
 use swash::scale::{Render, Source, StrikeWith};
-use swash::zeno::{Format, Vector};
+use swash::zeno::{Format, Stroke, Vector};
 
 use crate::{CacheKey, CacheKeyFlags, Color, FontSystem, HashMap};
 
@@ -55,28 +55,69 @@ fn swash_image(
     };
 
     // Select our source order
-    Render::new(&[
+    let mut render = Render::new(&[
         // Color outline with the first palette
         Source::ColorOutline(0),
         // Color bitmap with best fit selection mode
         Source::ColorBitmap(StrikeWith::BestFit),
         // Standard scalable outline
         Source::Outline,
-    ])
-    // Select a subpixel format
-    .format(Format::Alpha)
-    // Apply the fractional offset
-    .offset(offset)
-    .transform(if cache_key.flags.contains(CacheKeyFlags::FAKE_ITALIC) {
-        Some(Transform::skew(
-            Angle::from_degrees(14.0),
-            Angle::from_degrees(0.0),
-        ))
-    } else {
-        None
-    })
-    // Render the image
-    .render(&mut scaler, cache_key.glyph_id)
+    ]);
+    render
+        // Select a subpixel format
+        .format(Format::Alpha)
+        // Apply the fractional offset
+        .offset(offset)
+        .transform(if cache_key.flags.contains(CacheKeyFlags::FAKE_ITALIC) {
+            Some(Transform::skew(
+                Angle::from_degrees(14.0),
+                Angle::from_degrees(0.0),
+            ))
+        } else {
+            None
+        });
+    let fill = render.render(&mut scaler, cache_key.glyph_id)?;
+    let stroke_width = font.synthetic_bold_stroke_width(f32::from_bits(cache_key.font_size_bits));
+    if stroke_width == 0.0 || !matches!(fill.source, Source::Outline) || fill.data.is_empty() {
+        return Some(fill);
+    }
+
+    // Stroke the actual scaled outline, with Skia's default miter join/limit and butt cap.
+    // Its bitmap bearings include the outward growth; the shaped advance is never modified.
+    let stroke = render
+        .style(Stroke::new(stroke_width))
+        .render(&mut scaler, cache_key.glyph_id)?;
+    // The fill's control-point bounds may exceed the stroke's evaluated curve bounds.
+    let left = fill.placement.left.min(stroke.placement.left);
+    let top = fill.placement.top.max(stroke.placement.top);
+    let right = (fill.placement.left + fill.placement.width as i32)
+        .max(stroke.placement.left + stroke.placement.width as i32);
+    let bottom = (fill.placement.top - fill.placement.height as i32)
+        .min(stroke.placement.top - stroke.placement.height as i32);
+    let placement = Placement {
+        left,
+        top,
+        width: (right - left) as u32,
+        height: (top - bottom) as u32,
+    };
+    let mut image = SwashImage {
+        source: Source::Outline,
+        content: Content::Mask,
+        placement,
+        data: vec![0; placement.width as usize * placement.height as usize],
+    };
+    for layer in [stroke, fill] {
+        let dx = (layer.placement.left - left) as usize;
+        let dy = (top - layer.placement.top) as usize;
+        for y in 0..layer.placement.height as usize {
+            for x in 0..layer.placement.width as usize {
+                let src = u32::from(layer.data[y * layer.placement.width as usize + x]);
+                let dst = &mut image.data[(y + dy) * placement.width as usize + x + dx];
+                *dst = (src + (u32::from(*dst) * (255 - src) + 127) / 255) as u8;
+            }
+        }
+    }
+    Some(image)
 }
 
 fn swash_outline_commands(

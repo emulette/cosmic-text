@@ -4,7 +4,7 @@ use core::fmt::Display;
 
 use core::ops::Range;
 
-use crate::{math, CacheKey, CacheKeyFlags, Color, GlyphDecorationData};
+use crate::{CacheKey, CacheKeyFlags, Color, GlyphDecorationData, math};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
@@ -96,7 +96,8 @@ impl LayoutGlyph {
             self.font_size * scale,
             (
                 (self.x + x_offset).mul_add(scale, offset.0),
-                math::truncf((self.y - y_offset).mul_add(scale, offset.1)), // Hinting in Y axis
+                // Hinting in Y axis: the baseline takes the nearest pixel row (Prika patch).
+                math::roundf((self.y - y_offset).mul_add(scale, offset.1)),
             ),
             self.font_weight,
             self.cache_key_flags,

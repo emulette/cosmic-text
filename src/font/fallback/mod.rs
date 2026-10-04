@@ -66,6 +66,15 @@ mod platform;
 /// let font_system = FontSystem::new_with_locale_and_db_and_fallback(locale, db, MyFallback);
 /// ```
 pub trait Fallback: Send + Sync {
+    /// Whether fallback families not named by the family lists retain font database order.
+    ///
+    /// The default keeps cosmic-text's style/weight matching order. Application-owned bundled
+    /// font chains can opt in when database insertion order is their fallback contract. Faces
+    /// within one family still select the requested weight, stretch, and style first.
+    fn database_order_fallback(&self) -> bool {
+        false
+    }
+
     /// Fallbacks to use after any script specific fallbacks
     fn common_fallback(&self) -> &[&'static str];
 
@@ -265,6 +274,11 @@ impl<'a> FontFallbackIter<'a> {
             })
     }
 
+    /// Returns the BCP 47 locale configured for this shaping system.
+    pub fn locale(&self) -> &str {
+        self.font_system.locale()
+    }
+
     pub fn shape_caches(&mut self) -> &mut ShapeBuffer {
         &mut self.font_system.shape_buffer
     }
@@ -360,10 +374,11 @@ impl<'a> FontFallbackIter<'a> {
                                 return Some(font);
                             }
                         } else {
-                            assert!(self
-                                .font_system
-                                .monospace_fallbacks_buffer
-                                .insert(fallback_info));
+                            assert!(
+                                self.font_system
+                                    .monospace_fallbacks_buffer
+                                    .insert(fallback_info)
+                            );
                         }
                     }
                 }
@@ -404,10 +419,11 @@ impl<'a> FontFallbackIter<'a> {
                                 font_weight: m_key.font_weight,
                                 id: m_key.id,
                             };
-                            assert!(self
-                                .font_system
-                                .monospace_fallbacks_buffer
-                                .insert(fallback_info));
+                            assert!(
+                                self.font_system
+                                    .monospace_fallbacks_buffer
+                                    .insert(fallback_info)
+                            );
                         }
                     }
                 }

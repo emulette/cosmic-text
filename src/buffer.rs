@@ -10,10 +10,9 @@ use core_maths::CoreFloat;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
-    render_decoration, Affinity, Align, Attrs, AttrsList, BidiParagraphs, BorrowedWithFontSystem,
-    BufferLine, Color, Cursor, DecorationSpan, Ellipsize, FontSystem, Hinting, LayoutCursor,
-    LayoutGlyph, LayoutLine, LineEnding, LineIter, Motion, Renderer, Scroll, ShapeLine, Shaping,
-    Wrap,
+    Affinity, Align, Attrs, AttrsList, BidiParagraphs, BorrowedWithFontSystem, BufferLine, Color,
+    Cursor, DecorationSpan, Ellipsize, FontSystem, Hinting, LayoutCursor, LayoutGlyph, LayoutLine,
+    LineEnding, LineIter, Motion, Renderer, Scroll, ShapeLine, Shaping, Wrap, render_decoration,
 };
 
 bitflags::bitflags! {
@@ -255,9 +254,11 @@ impl<'b> Iterator for LayoutRunIter<'b> {
                 self.total_height += line_height;
 
                 let line_top = self.line_top - self.scroll;
-                let glyph_height = layout_line.max_ascent + layout_line.max_descent;
+                // Browsers center whole-pixel font ascent and descent in the line box (Prika patch).
+                let ascent = crate::math::roundf(layout_line.max_ascent);
+                let glyph_height = ascent + crate::math::roundf(layout_line.max_descent);
                 let centering_offset = (line_height - glyph_height) / 2.0;
-                let line_y = line_top + centering_offset + layout_line.max_ascent;
+                let line_y = line_top + centering_offset + ascent;
                 if let Some(height) = self.height_opt {
                     if line_y - layout_line.max_ascent > height {
                         return None;

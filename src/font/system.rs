@@ -7,8 +7,8 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::ops::{Deref, DerefMut};
 use fontdb::{FaceInfo, Query, Style};
-use skrifa::raw::{ReadError, TableProvider as _};
 use skrifa::MetadataProvider;
+use skrifa::raw::{ReadError, TableProvider as _};
 
 // re-export fontdb and harfrust
 pub use fontdb;
@@ -376,8 +376,34 @@ impl FontSystem {
                     .map(|face| FontMatchKey::new(attrs, face, &self.db))
                     .collect::<Vec<_>>();
 
-                // Sort so we get the keys with weight_offset=0 first
-                font_match_keys.sort();
+                if self.dyn_fallback.database_order_fallback() {
+                    let mut families = HashMap::default();
+                    let mut face_order = HashMap::default();
+                    for (index, face) in self.db.faces().enumerate() {
+                        let (family_index, selected) =
+                            if let Some((family, _)) = face.families.first() {
+                                *families.entry(family).or_insert_with(|| {
+                                    (
+                                        index,
+                                        self.db.query(&Query {
+                                            families: &[fontdb::Family::Name(family)],
+                                            weight: attrs.weight,
+                                            stretch: attrs.stretch,
+                                            style: attrs.style,
+                                        }),
+                                    )
+                                })
+                            } else {
+                                (index, Some(face.id))
+                            };
+                        face_order
+                            .insert(face.id, (family_index, selected != Some(face.id), index));
+                    }
+                    font_match_keys.sort_by_key(|key| face_order[&key.id]);
+                } else {
+                    // Sort so we get the keys with weight_offset=0 first
+                    font_match_keys.sort();
+                }
 
                 // db.query is better than above, but returns just one font
                 let query = Query {
